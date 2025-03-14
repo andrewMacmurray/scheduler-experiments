@@ -5,6 +5,7 @@ type Tag =
   | "FAIL"
   | "AND_THEN"
   | "ON_ERROR"
+  | "FORK"
   | "BINDING"
   | "RECIEVE"
 
@@ -26,6 +27,7 @@ export type Task =
   | Fail
   | AndThen
   | OnError
+  | Fork
   | Binding
   | Recieve
 
@@ -49,6 +51,13 @@ interface OnError {
   tag: "ON_ERROR"
   task: Task
   callback: (val: any) => Task
+}
+
+interface Fork {
+  tag: "FORK"
+  taskA: Task
+  taskB: Task
+  callback: (a: any, b: any) => any
 }
 
 interface Recieve {
@@ -115,7 +124,12 @@ export function map2(
   taskA: Task,
   taskB: Task,
 ): Task {
-  return andThen(taskA, (a) => andThen(taskB, (b) => succeed(f(a, b))))
+  return {
+    tag: "FORK",
+    taskA: taskA,
+    taskB: taskB,
+    callback: f,
+  }
 }
 
 /** Run a Process */
@@ -176,6 +190,76 @@ function _Scheduler_step(proc: Process) {
         // Any values that have been sent to the process are hoovered up one by one here
         proc.root = proc.root.callback(proc.mailbox.shift())
         break
+      case "FORK":
+        // Forking a process into 2..
+        const join_results = proc.root.callback
+        let rA = null
+        let rB = null
+        let err = null
+
+        const ta = andThen(proc.root.taskA, (resA) => {
+          return binding(() => {
+            if (rB) {
+              // If process B result has already come back create a `succeed` task with the combined results
+              // Restart the parent process with the combined result
+              proc.root = succeed(join_results(resA, rB))
+              _Scheduler_step(proc)
+            } else {
+              rA = resA
+            }
+            // TODO: can the child processes be cleaned up?
+            return () => {}
+          })
+        })
+
+        const tea = onError(ta, (eA) => {
+          return binding(() => {
+            if (err) return () => {}
+
+            err = eA
+            proc.root = fail(eA)
+            _Scheduler_step(proc)
+
+            return () => {}
+          })
+        })
+
+        const tb = andThen(proc.root.taskB, (resB) => {
+          return binding(() => {
+            if (rA) {
+              // If process A result has already come back create a `succeed` task with the combined results
+              // Restart the parent process with the combined result
+              proc.root = succeed(join_results(rA, resB))
+              _Scheduler_step(proc)
+            } else {
+              rB = resB
+            }
+            // TODO: can the child processes be cleaned up?
+            return () => {}
+          })
+        })
+
+        const teb = onError(tb, (eB) => {
+          return binding(() => {
+            if (err) return () => {}
+
+            err = eB
+            proc.root = fail(eB)
+            _Scheduler_step(proc)
+
+            return () => {}
+          })
+        })
+
+        const procA = newProcess(tea)
+        const procB = newProcess(teb)
+
+        // step through both subprocesses
+        _Scheduler_step(procA)
+        _Scheduler_step(procB)
+
+        // Bail out until the above are done
+        return
       case "AND_THEN":
       case "ON_ERROR":
         // I find the semantics here a bit confusing
