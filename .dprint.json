@@ -1,0 +1,10 @@
+{
+  "incremental": false,
+  "lineWidth": 100,
+  "typescript": {
+    "arguments.trailingCommas": "never",
+    "semiColons": "asi",
+    "unionAndIntersectionType.preferHanging": true
+  },
+  "plugins": ["https://plugins.dprint.dev/typescript-0.88.3.wasm"]
+}

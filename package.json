@@ -1,0 +1,15 @@
+{
+  "name": "scheduler",
+  "version": "1.0.0",
+  "description": "",
+  "license": "MIT",
+  "author": "Andrew MacMuray",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "start": "node --experimental-strip-types ./src/index.ts"
+  },
+  "devDependencies": {
+    "dprint": "^0.49.1"
+  }
+}
