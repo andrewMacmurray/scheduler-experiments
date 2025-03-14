@@ -1,6 +1,6 @@
 /** TYPES */
 
-type Tag = "SUCCEED" | "FAIL" | "AND_THEN" | "ON_ERROR" | "BINDING" | "RECIEVE";
+type Tag = "SUCCEED" | "FAIL" | "AND_THEN" | "ON_ERROR" | "FORK" | "BINDING" | "RECIEVE";
 
 export interface Process {
   id: number;
@@ -33,6 +33,13 @@ interface OnError {
   callback: (val: any) => Task;
 }
 
+interface Fork {
+  tag: "FORK";
+  procA: Process;
+  procB: Process;
+  callback: (a: any, b: any) => any;
+}
+
 interface Recieve {
   tag: "RECIEVE";
   callback: (val: any) => Task;
@@ -46,7 +53,7 @@ interface Binding {
   kill?: Cleanup;
 }
 
-export type Task = Succeed | Fail | AndThen | OnError | Recieve | Binding;
+export type Task = Succeed | Fail | AndThen | OnError | Fork | Recieve | Binding;
 
 interface Stack {
   tag: Tag;
@@ -101,7 +108,14 @@ export function recieve(callback: (val: any) => Task): Task {
 }
 
 export function map2(f: (a: any, b: any) => any, taskA: Task, taskB: Task): Task {
-  return andThen(taskA, (a) => andThen(taskB, (b) => succeed(f(a, b))));
+  const procA = newProcess(taskA);
+  const procB = newProcess(taskB);
+  return {
+    tag: "FORK",
+    procA: procA,
+    procB: procB,
+    callback: f,
+  };
 }
 
 /** Run a Process */
@@ -166,6 +180,58 @@ function _Scheduler_step(proc: Process) {
         // Any values that have been sent to the process are hoovered up one by one here
         proc.root = proc.root.callback!(proc.mailbox.shift());
         break;
+      case "FORK":
+        // Forking a process into 2..
+        const join_results = proc.root.callback;
+        let rA = null;
+        let rB = null;
+
+        // Modify subprocess A to check on subprocess B and either:
+        // - re-start the parent process with a combined result
+        // - save the intermediate result and wait for subprocess B to finish
+        // TODO: handle failure
+        proc.root.procA.mailbox = proc.mailbox;
+        proc.root.procA.root = andThen(proc.root.procA.root, (resA) => {
+          return binding(() => {
+            if (rB) {
+              // If process B result has already come back create a `succeed` task with the combined results
+              // Restart the parent process with the combined result
+              proc.root = succeed(join_results(resA, rB));
+              _Scheduler_step(proc);
+            } else {
+              rA = resA;
+            }
+            // TODO: can the child processes be cleaned up?
+            return () => {};
+          });
+        });
+
+        // Modify subprocess B to check on subprocess A and either:
+        // - re-start the parent process with a combined result
+        // - save the intermediate result and wait for subprocess A to finish
+        // TODO: handle failure
+        proc.root.procB.mailbox = proc.mailbox;
+        proc.root.procB.root = andThen(proc.root.procB.root, (resB) => {
+          return binding(() => {
+            if (rA) {
+              // If process A result has already come back create a `succeed` task with the combined results
+              // Restart the parent process with the combined result
+              proc.root = succeed(join_results(rA, resB));
+              _Scheduler_step(proc);
+            } else {
+              rB = resB;
+            }
+            // TODO: can the child processes be cleaned up?
+            return () => {};
+          });
+        });
+
+        // step through both subprocesses
+        _Scheduler_step(proc.root.procA);
+        _Scheduler_step(proc.root.procB);
+
+        // Bail out until the above are done
+        return;
       case "AND_THEN":
       case "ON_ERROR":
         // I find the semantics here a bit confusing
