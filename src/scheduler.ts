@@ -132,6 +132,15 @@ export function map2(
   }
 }
 
+function kill(task: Task) {
+  if (task.tag === "BINDING") {
+    task.kill && task.kill()
+  } else if (task.tag === "FORK") {
+    kill(task.taskA)
+    kill(task.taskB)
+  }
+}
+
 /** Run a Process */
 
 let guid: number = 0
@@ -207,13 +216,16 @@ function _Scheduler_step(proc: Process) {
             } else {
               rA = resA
             }
-            // TODO: can the child processes be cleaned up?
+
             return () => {}
           })
         })
 
         const tea = onError(ta, (eA) => {
           return binding(() => {
+            // kill whatever is running in process B
+            kill(procB.root)
+
             if (err) return () => {}
 
             err = eA
@@ -234,13 +246,16 @@ function _Scheduler_step(proc: Process) {
             } else {
               rB = resB
             }
-            // TODO: can the child processes be cleaned up?
+
             return () => {}
           })
         })
 
         const teb = onError(tb, (eB) => {
           return binding(() => {
+            // kill whatever is running in process A
+            kill(procA.root)
+
             if (err) return () => {}
 
             err = eB
