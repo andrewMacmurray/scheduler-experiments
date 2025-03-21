@@ -49,4 +49,6 @@ const add2 = (a, b) => a + b
 const sleepyAdd = S.map2(add2, sleep(1005), sleep(1000))
 const doubleSleepyAdd = S.map2(add2, sleepyAdd, sleepyAdd)
 
-runTask(doubleSleepyAdd)
+const batched = S.batch(Array.from({ length: 100000 }, (_, i) => sleep(100)))
+
+runTask(batched)

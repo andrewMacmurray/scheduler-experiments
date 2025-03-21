@@ -5,7 +5,7 @@ type Tag =
   | "FAIL"
   | "AND_THEN"
   | "ON_ERROR"
-  | "FORK"
+  | "BATCH"
   | "BINDING"
   | "RECIEVE"
 
@@ -27,7 +27,7 @@ export type Task =
   | Fail
   | AndThen
   | OnError
-  | Fork
+  | Batch
   | Binding
   | Recieve
 
@@ -53,11 +53,9 @@ interface OnError {
   callback: (val: any) => Task
 }
 
-interface Fork {
-  tag: "FORK"
-  taskA: Task
-  taskB: Task
-  callback: (a: any, b: any) => any
+interface Batch {
+  tag: "BATCH"
+  tasks: Task[]
 }
 
 interface Recieve {
@@ -97,6 +95,13 @@ export function andThen(task: Task, callback: (val: any) => Task): Task {
   }
 }
 
+export function batch(tasks: Task[]): Task {
+  return {
+    tag: "BATCH",
+    tasks: tasks,
+  }
+}
+
 export function onError(task: Task, callback: (val: any) => Task): Task {
   return {
     tag: "ON_ERROR",
@@ -124,20 +129,14 @@ export function map2(
   taskA: Task,
   taskB: Task,
 ): Task {
-  return {
-    tag: "FORK",
-    taskA: taskA,
-    taskB: taskB,
-    callback: f,
-  }
+  return andThen(batch([taskA, taskB]), ([a, b]) => succeed(f(a, b)))
 }
 
 function kill(task: Task) {
   if (task.tag === "BINDING") {
     task.kill && task.kill()
-  } else if (task.tag === "FORK") {
-    kill(task.taskA)
-    kill(task.taskB)
+  } else if (task.tag === "BATCH") {
+    task.tasks.forEach(kill)
   }
 }
 
@@ -199,79 +198,53 @@ function _Scheduler_step(proc: Process) {
         // Any values that have been sent to the process are hoovered up one by one here
         proc.root = proc.root.callback(proc.mailbox.shift())
         break
-      case "FORK":
-        // Forking a process into 2..
-        const join_results = proc.root.callback
-        let rA = null
-        let rB = null
+      case "BATCH":
+        // Batch running processes
+        if (proc.root.tasks.length === 0) return
+
+        let results = Array(proc.root.tasks.length)
+        let procs: Process[] = []
+        let count = 0
         let err = null
 
-        const ta = andThen(proc.root.taskA, (resA) => {
-          return binding(() => {
-            if (rB) {
-              // If process B result has already come back create a `succeed` task with the combined results
-              // Restart the parent process with the combined result
-              proc.root = succeed(join_results(resA, rB))
-              _Scheduler_step(proc)
-            } else {
-              rA = resA
-            }
-
-            return () => {}
-          })
-        })
-
-        const tea = onError(ta, (eA) => {
-          return binding(() => {
-            // kill whatever is running in process B
-            kill(procB.root)
-
+        const handleError = (e) =>
+          binding(() => {
             if (err) return () => {}
 
-            err = eA
-            proc.root = fail(eA)
+            // if an error occurs kill any other running processes and resume the parent process with the error
+            procs.forEach(p => kill(p.root))
+            err = e
+            proc.root = fail(e)
             _Scheduler_step(proc)
 
             return () => {}
           })
+
+        const tasks = proc.root.tasks.map((task, i) => {
+          const handleSuccess = (res) =>
+            binding(() => {
+              results[i] = res
+              count++
+
+              // if we have all results send them back to the parent process and resume
+              if (count === results.length) {
+                proc.root = succeed(results)
+                _Scheduler_step(proc)
+              }
+
+              return () => {}
+            })
+
+          return onError(
+            andThen(task, handleSuccess),
+            handleError
+          )
         })
 
-        const tb = andThen(proc.root.taskB, (resB) => {
-          return binding(() => {
-            if (rA) {
-              // If process A result has already come back create a `succeed` task with the combined results
-              // Restart the parent process with the combined result
-              proc.root = succeed(join_results(rA, resB))
-              _Scheduler_step(proc)
-            } else {
-              rB = resB
-            }
+        procs = tasks.map(newProcess)
 
-            return () => {}
-          })
-        })
-
-        const teb = onError(tb, (eB) => {
-          return binding(() => {
-            // kill whatever is running in process A
-            kill(procA.root)
-
-            if (err) return () => {}
-
-            err = eB
-            proc.root = fail(eB)
-            _Scheduler_step(proc)
-
-            return () => {}
-          })
-        })
-
-        const procA = newProcess(tea)
-        const procB = newProcess(teb)
-
-        // step through both subprocesses
-        _Scheduler_step(procA)
-        _Scheduler_step(procB)
+        // step through subprocesses
+        procs.forEach(p => !err && _Scheduler_step(p))
 
         // Bail out until the above are done
         return
